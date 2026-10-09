@@ -15,6 +15,7 @@ from ledgerloop.adapters.memory import (
     RecordingDispatcher,
 )
 from ledgerloop.core.enums import ActionKind, Currency, FailureClass, IdempotencyState
+from ledgerloop.core.errors import ProviderError
 from ledgerloop.core.ids import ActionId, IdempotencyKey, RunId, TenantId
 from ledgerloop.core.models import Action, ActionReceipt
 from ledgerloop.core.money import Money
@@ -369,6 +370,69 @@ class TestIndeterminate:
         cutoff = clock.now() + timedelta(hours=1)
         stale = [r async for r in idempotency.find_in_flight(older_than=cutoff)]
         assert len(stale) == 1
+
+
+class TimingOutAdapter(RecordingDispatcher):
+    """An adapter that maps a gateway timeout to ProviderError, classed right.
+
+    The request went out and the 504 came from a proxy in front of the PSP.
+    The adapter does not raise IndeterminateError - it raises its usual
+    error type and says what it means through the failure class.
+    """
+
+    async def dispatch(self, action, *, at):
+        self.dispatched.append(action)
+        raise ProviderError(
+            "Gateway timeout after the request was sent",
+            provider="psp",
+            failure_class=FailureClass.INDETERMINATE,
+            status_code=504,
+        )
+
+
+class TestAnIndeterminateProviderError:
+    @pytest.fixture
+    def dispatcher(self) -> TimingOutAdapter:
+        return TimingOutAdapter()
+
+    async def test_the_claim_is_left_in_flight(self, executor, idempotency, tenant, run_id):
+        action = refund()
+
+        outcome = await executor.execute(action, run_id=run_id, tenant_id=tenant)
+
+        # Settled as failed, the claim would say the refund never went out -
+        # and the next proposal would be free to send it again.
+        assert outcome.indeterminate
+        assert not outcome.succeeded
+        record = await idempotency.get(action.idempotency_key, tenant)
+        assert record.state is IdempotencyState.IN_FLIGHT
+
+    async def test_the_effect_stays_in_doubt_in_the_chain(
+        self, executor, ledger, tenant, run_id
+    ):
+        action = refund()
+
+        await executor.execute(action, run_id=run_id, tenant_id=tenant)
+
+        (effect,) = replay_effects(await ledger.read(tenant, run_id))
+        assert effect.action_id == action.id
+        assert effect.indeterminate
+
+    async def test_a_definitive_provider_error_still_settles_as_failed(
+        self, idempotency, ledger, clock, tenant, run_id
+    ):
+        dispatcher = RecordingDispatcher()
+        dispatcher.fail_next(FailureClass.INSUFFICIENT_FUNDS)
+        executor = ActionExecutor(
+            idempotency=idempotency, dispatcher=dispatcher, ledger=ledger, clock=clock
+        )
+        action = refund()
+
+        outcome = await executor.execute(action, run_id=run_id, tenant_id=tenant)
+
+        assert not outcome.indeterminate
+        record = await idempotency.get(action.idempotency_key, tenant)
+        assert record.state is IdempotencyState.FAILED
 
 
 class TestAClaimSomebodyElseHolds:

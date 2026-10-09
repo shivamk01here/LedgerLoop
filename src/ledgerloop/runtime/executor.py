@@ -188,25 +188,30 @@ class ActionExecutor:
         # 4. Dispatch.
         try:
             receipt = await self._dispatcher.dispatch(action, at=self._clock.now())
-        except IndeterminateError as exc:
-            # Deliberately leave the claim IN_FLIGHT. Settling it either way
-            # would be a guess, and both guesses are wrong half the time.
-            logger.error(
-                "Action %s is indeterminate - leaving claim in flight for reconciliation",
-                action.id,
-            )
-            await self._write(
-                run_id,
-                tenant_id,
-                LedgerEventType.ACTION_FAILED,
-                {
-                    "action_id": str(action.id),
-                    "indeterminate": True,
-                    "error": str(exc),
-                },
-            )
-            return ExecutionOutcome(receipt=None, indeterminate=True, error=str(exc))
-        except ProviderError as exc:
+        except (IndeterminateError, ProviderError) as exc:
+            # The class decides, not the type. An adapter that maps a gateway
+            # timeout to ProviderError(failure_class=INDETERMINATE) is saying
+            # exactly what IndeterminateError says, and settling that claim
+            # as failed would write "nothing moved" over money that may have.
+            if exc.needs_reconciliation:
+                # Deliberately leave the claim IN_FLIGHT. Settling it either
+                # way would be a guess, and both guesses are wrong half the time.
+                logger.error(
+                    "Action %s is indeterminate - leaving claim in flight for reconciliation",
+                    action.id,
+                )
+                await self._write(
+                    run_id,
+                    tenant_id,
+                    LedgerEventType.ACTION_FAILED,
+                    {
+                        "action_id": str(action.id),
+                        "indeterminate": True,
+                        "error": str(exc),
+                    },
+                )
+                return ExecutionOutcome(receipt=None, indeterminate=True, error=str(exc))
+
             settled = await self._settle_failure(action, tenant_id, str(exc))
             await self._write(
                 run_id,
