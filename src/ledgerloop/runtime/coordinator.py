@@ -248,11 +248,22 @@ class RunCoordinator:
                 does not authorize this action.
             BudgetExhaustedError: Executing it would carry the run past its
                 value ceiling. The run is FAILED and nothing was dispatched.
+            DeadlineExceededError: The run's deadline passed while it was
+                halted. The run is EXPIRED, as the reaper would have left it,
+                and nothing was dispatched - whatever the reviewer said.
         """
         if run.state is not RunState.AWAITING_APPROVAL:
             raise StateTransitionError("Run", run.state.value, "resuming")
         if run.pending_approval_id is None:  # pragma: no cover - set on halt
             raise LedgerloopError("Halted run has no pending approval", context={})
+
+        deadline = run.spec.deadline
+        if deadline is not None and self._clock.now() >= deadline:
+            await self._expire_halted(run, run.pending_approval_id)
+            raise DeadlineExceededError(
+                f"Deadline {deadline.isoformat()} passed while the run was awaiting approval",
+                context={"run_id": str(run.id), "action_id": str(action.id)},
+            )
 
         request = await self._approvals.get(run.tenant_id, run.pending_approval_id)
         if request is None:
@@ -551,6 +562,38 @@ class RunCoordinator:
         )
         logger.info("Run %s halted awaiting approval %s", run.id, request.id)
         return ActionResult(decision=decision, run=halted, approval_id=request.id)
+
+    async def _expire_halted(self, run: Run, approval_id: ApprovalId) -> None:
+        """End a halted run past its deadline the way the reaper would have.
+
+        The reaper sweeps on a schedule, and a worker resuming the run can
+        get there between the deadline and the sweep. Whoever gets there
+        first, the run ends the same way: EXPIRED, with the same entry, and
+        the request retired if nobody had answered it.
+        """
+        now = self._clock.now()
+        expired = await self._save(run.expire(at=now))
+        deadline = run.spec.deadline
+        await self._write(
+            expired,
+            LedgerEventType.RUN_EXPIRED,
+            {
+                "halted_in": run.state.value,
+                "deadline": None if deadline is None else deadline.isoformat(),
+                "approval_id": str(approval_id),
+            },
+        )
+        try:
+            retired = await self._approvals.expire(run.tenant_id, approval_id, at=now)
+        except LedgerloopError:
+            logger.exception("Could not retire approval %s on run %s", approval_id, run.id)
+            return
+        if retired is not None:
+            await self._write(
+                expired,
+                LedgerEventType.APPROVAL_EXPIRED,
+                {"approval_id": str(approval_id), "state": retired.state.value},
+            )
 
     async def _check_deadline(self, run: Run, action: Action, *, at: datetime) -> None:
         """Stop a run that is still acting after its deadline.

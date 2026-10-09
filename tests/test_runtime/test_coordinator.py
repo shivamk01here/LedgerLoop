@@ -668,6 +668,87 @@ class TestDeadlineWhileRunning:
         assert dispatcher.dispatch_count == 1
 
 
+class TestDeadlineWhileHalted:
+    """A worker can reach a halted run between its deadline and the reaper."""
+
+    async def _granted_after_deadline(self, coordinator, runs, gateway, clock, tenant):
+        run = await _running_run_with_deadline(runs, tenant, AT + timedelta(hours=1))
+        action = _refund("50000")
+        halted = await coordinator.propose(run, action)
+        await clock.advance(timedelta(hours=2))
+        # Inside the approval's own three-day window, so the grant lands -
+        # but the case it was for closed an hour ago.
+        await gateway.submit(
+            tenant, halted.approval_id, approved=True, actor=APPROVER, at=clock.now()
+        )
+        return halted, action
+
+    async def test_a_grant_after_the_deadline_does_not_dispatch(
+        self, coordinator, runs, gateway, dispatcher, clock, tenant
+    ):
+        halted, action = await self._granted_after_deadline(
+            coordinator, runs, gateway, clock, tenant
+        )
+
+        with pytest.raises(DeadlineExceededError):
+            await coordinator.resume(halted.run, action)
+
+        assert dispatcher.dispatch_count == 0
+
+    async def test_the_run_ends_as_the_reaper_would_have_left_it(
+        self, coordinator, runs, gateway, ledger, clock, tenant
+    ):
+        halted, action = await self._granted_after_deadline(
+            coordinator, runs, gateway, clock, tenant
+        )
+
+        with pytest.raises(DeadlineExceededError):
+            await coordinator.resume(halted.run, action)
+
+        stored = await runs.get(tenant, halted.run.id)
+        assert stored.state is RunState.EXPIRED
+        assert stored.stop_reason is StopReason.DEADLINE_EXCEEDED
+        entry = (await ledger.read(tenant, halted.run.id))[-1]
+        assert entry.event_type is LedgerEventType.RUN_EXPIRED
+        assert entry.payload["halted_in"] == "awaiting_approval"
+        assert entry.payload["approval_id"] == str(halted.approval_id)
+        await ledger.verify_chain(tenant, halted.run.id)
+
+    async def test_an_unanswered_request_is_retired_with_it(
+        self, coordinator, runs, gateway, ledger, clock, tenant
+    ):
+        run = await _running_run_with_deadline(runs, tenant, AT + timedelta(hours=1))
+        action = _refund("50000")
+        halted = await coordinator.propose(run, action)
+        await clock.advance(timedelta(hours=2))
+
+        with pytest.raises(DeadlineExceededError):
+            await coordinator.resume(halted.run, action)
+
+        # Not a "still pending" error the caller has to retry until the
+        # reaper comes round: the run is over, and the request goes with it.
+        request = await gateway.get(tenant, halted.approval_id)
+        assert request.state is ApprovalState.EXPIRED
+        events = [e.event_type for e in await ledger.read(tenant, halted.run.id)]
+        assert events[-2:] == [LedgerEventType.RUN_EXPIRED, LedgerEventType.APPROVAL_EXPIRED]
+
+    async def test_a_grant_before_the_deadline_still_resumes(
+        self, coordinator, runs, gateway, dispatcher, clock, tenant
+    ):
+        run = await _running_run_with_deadline(runs, tenant, AT + timedelta(hours=1))
+        action = _refund("50000")
+        halted = await coordinator.propose(run, action)
+        await clock.advance(timedelta(minutes=30))
+        await gateway.submit(
+            tenant, halted.approval_id, approved=True, actor=APPROVER, at=clock.now()
+        )
+
+        result = await coordinator.resume(halted.run, action)
+
+        assert result.executed
+        assert dispatcher.dispatch_count == 1
+
+
 class TestCancel:
     async def test_cancelling_a_running_run(self, coordinator, runs, tenant):
         run = await _running_run(runs, tenant)
