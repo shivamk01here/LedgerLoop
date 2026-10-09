@@ -51,6 +51,7 @@ from ledgerloop.core.enums import (
 from ledgerloop.core.errors import (
     BudgetExhaustedError,
     ConcurrencyError,
+    DeadlineExceededError,
     IndeterminateError,
     LedgerloopError,
     PolicyViolationError,
@@ -189,12 +190,15 @@ class RunCoordinator:
             BudgetExhaustedError: The action would carry the run past its
                 value ceiling. The run is FAILED, nothing was dispatched, and
                 no approval was raised.
+            DeadlineExceededError: The run's deadline has passed. The run is
+                FAILED and the action went no further than being proposed.
         """
         if run.state is not RunState.RUNNING:
             raise StateTransitionError("Run", run.state.value, "acting")
 
         now = self._clock.now()
         await self._write(run, LedgerEventType.ACTION_PROPOSED, _summarize(action))
+        await self._check_deadline(run, action, at=now)
 
         decision = await self._policy.evaluate(action, run, at=now)
         await self._write(
@@ -547,6 +551,34 @@ class RunCoordinator:
         )
         logger.info("Run %s halted awaiting approval %s", run.id, request.id)
         return ActionResult(decision=decision, run=halted, approval_id=request.id)
+
+    async def _check_deadline(self, run: Run, action: Action, *, at: datetime) -> None:
+        """Stop a run that is still acting after its deadline.
+
+        The reaper ends runs that sat halted past their deadline, and only
+        those - a RUNNING run is not its to touch. So the deadline has to be
+        held here as well, where a run acts, or a run that never halted could
+        go on moving money for a case that stopped mattering on Friday.
+
+        Raises:
+            DeadlineExceededError: The deadline has passed. The run is FAILED
+                with DEADLINE_EXCEEDED by the time this is raised.
+        """
+        deadline = run.spec.deadline
+        if deadline is None or at < deadline:
+            return
+
+        reason = f"Deadline {deadline.isoformat()} passed before {action.id} could act"
+        logger.warning("Run %s is past its deadline: %s", run.id, reason)
+        await self._fail(
+            run,
+            reason,
+            stop_reason=StopReason.DEADLINE_EXCEEDED,
+            detail={"action_id": str(action.id), "deadline": deadline.isoformat()},
+        )
+        raise DeadlineExceededError(
+            reason, context={"run_id": str(run.id), "action_id": str(action.id)}
+        )
 
     async def _check_ceiling(self, run: Run, action: Action) -> None:
         """Stop the run before an action carries it past its value ceiling.

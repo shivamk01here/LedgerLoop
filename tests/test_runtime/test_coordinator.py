@@ -32,6 +32,7 @@ from ledgerloop.core.enums import (
 from ledgerloop.core.errors import (
     BudgetExhaustedError,
     ConcurrencyError,
+    DeadlineExceededError,
     IndeterminateError,
     PolicyViolationError,
     StateTransitionError,
@@ -587,6 +588,84 @@ class TestValueCeiling:
 
         async for _ in gateway.list_pending(tenant):
             pytest.fail("no approval should have been raised")
+
+
+async def _running_run_with_deadline(runs, tenant, deadline: datetime) -> Run:
+    run = await runs.create(
+        RunSpec(tenant_id=tenant, objective="Clear the queue by noon", deadline=deadline)
+    )
+    return await runs.save(run.start(at=AT), expected_version=0)
+
+
+class TestDeadlineWhileRunning:
+    """The reaper only ends halted runs. A running one is held here."""
+
+    async def test_a_run_past_its_deadline_cannot_act(
+        self, coordinator, runs, dispatcher, clock, tenant
+    ):
+        run = await _running_run_with_deadline(runs, tenant, AT + timedelta(hours=1))
+        await clock.advance(timedelta(hours=2))
+
+        with pytest.raises(DeadlineExceededError):
+            await coordinator.propose(run, _refund("1000"))
+
+        # Not a cent goes out for a case that stopped mattering an hour ago.
+        assert dispatcher.dispatch_count == 0
+
+    async def test_the_run_fails_saying_why(self, coordinator, runs, ledger, clock, tenant):
+        deadline = AT + timedelta(hours=1)
+        run = await _running_run_with_deadline(runs, tenant, deadline)
+        await clock.advance(timedelta(hours=2))
+        action = _refund("1000")
+
+        with pytest.raises(DeadlineExceededError):
+            await coordinator.propose(run, action)
+
+        stored = await runs.get(tenant, run.id)
+        assert stored.state is RunState.FAILED
+        assert stored.stop_reason is StopReason.DEADLINE_EXCEEDED
+        entry = (await ledger.read(tenant, run.id))[-1]
+        assert entry.event_type is LedgerEventType.RUN_FAILED
+        assert entry.payload["stop_reason"] == "deadline_exceeded"
+        assert entry.payload["action_id"] == str(action.id)
+        assert entry.payload["deadline"] == deadline.isoformat()
+        await ledger.verify_chain(tenant, run.id)
+
+    async def test_no_policy_decision_or_approval_is_made(
+        self, coordinator, runs, ledger, gateway, clock, tenant
+    ):
+        run = await _running_run_with_deadline(runs, tenant, AT + timedelta(hours=1))
+        await clock.advance(timedelta(hours=2))
+
+        with pytest.raises(DeadlineExceededError):
+            await coordinator.propose(run, _refund("84000"))
+
+        # A reviewer asked to sign off on a case that is already over is a
+        # wasted signature at best.
+        events = [e.event_type for e in await ledger.read(tenant, run.id)]
+        assert LedgerEventType.ACTION_EVALUATED not in events
+        assert [r async for r in gateway.list_pending(tenant)] == []
+
+    async def test_exactly_at_the_deadline_is_too_late(
+        self, coordinator, runs, clock, tenant
+    ):
+        # The same edge the reaper uses: due at the deadline, not after it.
+        run = await _running_run_with_deadline(runs, tenant, AT + timedelta(hours=1))
+        await clock.advance(timedelta(hours=1))
+
+        with pytest.raises(DeadlineExceededError):
+            await coordinator.propose(run, _refund("1000"))
+
+    async def test_before_the_deadline_nothing_changes(
+        self, coordinator, runs, dispatcher, clock, tenant
+    ):
+        run = await _running_run_with_deadline(runs, tenant, AT + timedelta(hours=1))
+        await clock.advance(timedelta(minutes=59))
+
+        result = await coordinator.propose(run, _refund("1000"))
+
+        assert result.executed
+        assert dispatcher.dispatch_count == 1
 
 
 class TestCancel:
