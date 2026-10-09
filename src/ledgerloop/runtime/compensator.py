@@ -47,7 +47,7 @@ from enum import StrEnum, unique
 from typing import TYPE_CHECKING
 
 from ledgerloop.core.enums import IdempotencyState, LedgerEventType, RunState, StopReason
-from ledgerloop.core.errors import IndeterminateError, LedgerloopError, StateTransitionError
+from ledgerloop.core.errors import LedgerloopError, StateTransitionError
 from ledgerloop.core.ids import IdempotencyKey
 from ledgerloop.core.models import ActionReceipt
 from ledgerloop.runtime.effects import replay_effects
@@ -370,8 +370,11 @@ class Compensator:
             receipt = await self._dispatcher.compensate(
                 effect.to_action(), effect.to_receipt(), at=self._clock.now()
             )
-        except IndeterminateError as exc:
-            # The reversal left and nothing came back. It may have landed, so
+        except LedgerloopError as exc:
+            if not exc.needs_reconciliation:
+                return await self._refused(effect, run, report, exc)
+            # The reversal left and nothing came back - whichever exception
+            # type said so, the class is what counts. It may have landed, so
             # this is not a refusal: a human told the provider said no will go
             # and refund by hand, and that is the second refund the claim was
             # taken to prevent. The claim stays in flight for the reconciler.
@@ -384,25 +387,8 @@ class Compensator:
                 run, effect, reversed_ok=False, detail=str(exc), indeterminate=True
             )
             return replace(report, unresolved=report.unresolved + 1)
-        except (LedgerloopError, NotImplementedError, ValueError) as exc:
-            # A definitive no, raised rather than returned. The claim is
-            # settled as failed, the same as when the no comes back as a
-            # receipt: left in flight, the next rollback would report a
-            # refused reversal as one still going out, and the reconciler
-            # would go and ask the provider a question it has answered.
-            logger.exception("Could not reverse effect %s on run %s", effect.action_id, run.id)
-            await self._settle(
-                reversal_key(effect),
-                run.tenant_id,
-                ActionReceipt(
-                    action_id=effect.action_id,
-                    state=IdempotencyState.FAILED,
-                    failure_reason=str(exc),
-                    settled_at=self._clock.now(),
-                ),
-            )
-            await self._write(run, effect, reversed_ok=False, detail=str(exc))
-            return replace(report, failed=report.failed + 1)
+        except (NotImplementedError, ValueError) as exc:
+            return await self._refused(effect, run, report, exc)
 
         await self._settle(reversal_key(effect), run.tenant_id, receipt)
         if receipt.state is IdempotencyState.FAILED:
@@ -432,6 +418,32 @@ class Compensator:
             provider_reference=receipt.provider_reference,
         )
         return replace(report, compensated=report.compensated + 1)
+
+    async def _refused(
+        self, effect: AppliedEffect, run: Run, report: CompensationReport, exc: Exception
+    ) -> CompensationReport:
+        """Record a definitive no, raised rather than returned.
+
+        The claim is settled as failed, the same as when the no comes back as
+        a receipt: left in flight, the next rollback would report a refused
+        reversal as one still going out, and the reconciler would go and ask
+        the provider a question it has answered.
+        """
+        logger.error(
+            "Could not reverse effect %s on run %s", effect.action_id, run.id, exc_info=exc
+        )
+        await self._settle(
+            reversal_key(effect),
+            run.tenant_id,
+            ActionReceipt(
+                action_id=effect.action_id,
+                state=IdempotencyState.FAILED,
+                failure_reason=str(exc),
+                settled_at=self._clock.now(),
+            ),
+        )
+        await self._write(run, effect, reversed_ok=False, detail=str(exc))
+        return replace(report, failed=report.failed + 1)
 
     async def _claim(self, effect: AppliedEffect, run: Run) -> IdempotencyRecord:
         """Claim the reversal key, returning the full record for the caller to inspect.

@@ -864,6 +864,52 @@ class _RefusingDispatcher(RecordingDispatcher):
         )
 
 
+class _GatewayTimeoutDispatcher(RecordingDispatcher):
+    """Says the reversal timed out through the failure class, not the type."""
+
+    async def compensate(self, action, receipt, *, at):
+        self.compensated.append(action)
+        raise ProviderError(
+            "Gateway timeout after the reversal was sent",
+            provider="psp",
+            failure_class=FailureClass.INDETERMINATE,
+            status_code=504,
+        )
+
+
+class TestAnIndeterminateProviderError:
+    async def test_it_is_unresolved_not_refused(
+        self, compensator, executor, runs, ledger, idempotency, tenant, clock
+    ):
+        run = await started_run(runs, tenant, clock)
+        await apply(executor, run, capture("ord_1"))
+        effect = replay_effects(await ledger.read(tenant, run.id))[0]
+
+        compensator = _with_dispatcher(compensator, _GatewayTimeoutDispatcher())
+        report = await compensator.compensate(await runs.get(tenant, run.id))
+
+        # Counted as refused and settled as failed, the refund that may have
+        # gone out would be sent again by whoever picks up the report.
+        assert report.unresolved == 1
+        assert report.failed == 0
+        record = await idempotency.get(reversal_key(effect), tenant)
+        assert record.state is IdempotencyState.IN_FLIGHT
+
+    async def test_a_definitive_one_is_still_refused(
+        self, compensator, executor, runs, ledger, idempotency, tenant, clock
+    ):
+        run = await started_run(runs, tenant, clock)
+        await apply(executor, run, capture("ord_1"))
+        effect = replay_effects(await ledger.read(tenant, run.id))[0]
+
+        compensator = _with_dispatcher(compensator, _RefusingDispatcher())
+        report = await compensator.compensate(await runs.get(tenant, run.id))
+
+        assert report.failed == 1
+        record = await idempotency.get(reversal_key(effect), tenant)
+        assert record.state is IdempotencyState.FAILED
+
+
 class _TimingOutDispatcher(RecordingDispatcher):
     """A provider that took the reversal and never answered."""
 
