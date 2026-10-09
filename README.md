@@ -304,6 +304,15 @@ The run moves first and the approval second, both under the run's version
 check. Do it the other way round and a worker that resumed a run a moment
 earlier has a perfectly good grant pulled out from under it.
 
+The reaper only sweeps halted runs, so the coordinator holds the deadline as
+well, wherever a run acts. A running run that proposes anything at or after
+its deadline is failed with `DEADLINE_EXCEEDED` before policy sees the
+action. A halted run resumed after its deadline is expired exactly as the
+reaper would have expired it, even if a reviewer granted the request in the
+meantime. Either way `DeadlineExceededError` is raised and nothing is
+dispatched. The approval's own expiry window does not change that: the run's
+deadline is when the case stops mattering, whatever the request still allows.
+
 Expiry is opt-in: a run whose `RunSpec` carries no deadline is never swept.
 And nothing here reverses anything — a run may well have moved money before
 it halted, and walking that back is the compensator's job.
