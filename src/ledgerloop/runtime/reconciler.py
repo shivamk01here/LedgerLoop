@@ -11,6 +11,10 @@ Reversals leave the same question behind when they time out, and they are
 swept the same way. The answer is written down differently, though: a
 reversal's claim names the action it was undoing, so its outcome goes into
 the chain as something that happened to the reversal, never to the original.
+
+The sweep is the backstop, across every tenant on a schedule. When one run
+is stuck - it cannot complete with an effect in doubt - `reconcile_run`
+asks about that run's open claims and nothing else.
 """
 
 from __future__ import annotations
@@ -23,10 +27,11 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from ledgerloop.core.enums import IdempotencyState, LedgerEventType
 from ledgerloop.core.errors import LedgerloopError
 from ledgerloop.core.models import ActionReceipt
-from ledgerloop.runtime.compensator import is_reversal_claim
+from ledgerloop.runtime.compensator import is_reversal_claim, reversal_key
+from ledgerloop.runtime.effects import replay_effects
 
 if TYPE_CHECKING:
-    from ledgerloop.core.ids import IdempotencyKey, TenantId
+    from ledgerloop.core.ids import IdempotencyKey, RunId, TenantId
     from ledgerloop.core.models import IdempotencyRecord
     from ledgerloop.core.ports import Clock, IdempotencyStore, LedgerStore
 
@@ -151,6 +156,59 @@ class Reconciler:
         )
         if checked:
             logger.info("Reconciliation sweep complete: %s", report)
+        return report
+
+    async def reconcile_run(self, tenant_id: TenantId, run_id: RunId) -> ReconciliationReport:
+        """Resolve what one run is waiting on, without waiting for the sweep.
+
+        `complete` will not finish a run with an effect in doubt, and a
+        rollback leaves one alone. The sweep gets to every claim eventually,
+        across every tenant; this goes straight to the ones a single run is
+        stuck on - effects it dispatched and never heard back about, and
+        reversals of its effects that went out and never came back - and
+        asks the provider about those.
+
+        The grace period still applies. A claim younger than it is counted
+        unresolved and left alone, for the same reason the sweep leaves it:
+        asked too soon, a provider says "never seen it" about a request that
+        lands a second later.
+
+        Raises:
+            LedgerIntegrityError: The run's chain does not verify. Which
+                claims to settle is read from it, and from an edited chain
+                that is a list somebody else wrote.
+        """
+        await self._ledger.verify_chain(tenant_id, run_id)
+        standing = replay_effects(await self._ledger.read(tenant_id, run_id))
+        cutoff = self._clock.now() - self._grace
+
+        keys: list[IdempotencyKey] = []
+        for effect in standing:
+            if effect.indeterminate:
+                if effect.idempotency_key is not None:
+                    keys.append(effect.idempotency_key)
+            elif effect.kind.reversal_kind is not None:
+                keys.append(reversal_key(effect))
+
+        counts = dict.fromkeys(
+            ("confirmed", "failed", "not_found", "unresolved", "skipped"), 0
+        )
+        checked = 0
+        for key in keys:
+            record = await self._idempotency.get(key, tenant_id)
+            if record is None or record.is_settled:
+                # No reversal was ever tried, or the claim already has its
+                # answer. Nothing here for a provider to be asked.
+                continue
+            checked += 1
+            if record.claimed_at >= cutoff:
+                counts["unresolved"] += 1
+                continue
+            counts[await self._resolve(record)] += 1
+
+        report = ReconciliationReport(checked=checked, **counts)
+        if checked:
+            logger.info("Reconciled run %s: %s", run_id, report)
         return report
 
     async def _resolve(self, record: IdempotencyRecord) -> str:
