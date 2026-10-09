@@ -4,8 +4,9 @@ Runs entirely in memory - no database, no payment provider, no API key. Two
 refunds go out. The first comes back clean; the connection drops on the
 second, so nobody knows whether it landed. The agent has nothing left to do
 and tries to finish, and the coordinator refuses: a run with an effect in
-doubt is not a success. Once the reconciler has asked the provider and got an
-answer, the same run completes, and its closing entry counts both refunds.
+doubt is not a success. Once the reconciler has asked the provider about that
+run's open claim and got an answer, the same run completes, and its closing
+entry counts both refunds.
 
     python examples/finished_run.py
 """
@@ -107,14 +108,16 @@ async def main() -> None:
         print(f"complete      -> refused: {exc.message}")
     print(f"              run={(await runs.get(tenant, run.id)).state.value}")
 
-    # --- the reconciler asks the provider what happened -------------------
+    # --- the reconciler asks the provider about this run's doubts ---------
+    # Not the cross-tenant sweep: just the claims this run is stuck on, once
+    # they are older than the grace period.
     await clock.advance(timedelta(minutes=30))
     report = await Reconciler(
         idempotency=idempotency,
         lookup=ProviderSaysItLanded(second_refund),
         ledger=ledger,
         clock=clock,
-    ).sweep()
+    ).reconcile_run(tenant, run.id)
     print(f"\nreconcile     -> {report}")
 
     # --- and now it is a success ------------------------------------------
