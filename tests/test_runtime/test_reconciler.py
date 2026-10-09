@@ -18,7 +18,7 @@ from ledgerloop.core.enums import (
     IdempotencyState,
     LedgerEventType,
 )
-from ledgerloop.core.errors import IndeterminateError
+from ledgerloop.core.errors import IndeterminateError, LedgerIntegrityError
 from ledgerloop.core.ids import ActionId, IdempotencyKey, RunId, TenantId
 from ledgerloop.core.models import Action, ActionReceipt, RunSpec
 from ledgerloop.core.money import Money
@@ -513,6 +513,148 @@ class TestLedgering:
         await _reconciler(idempotency, ledger, clock, lookup).sweep()
 
         assert "error" not in (await ledger.read(tenant, run_id))[-1].payload
+
+
+class TestReconcilingOneRun:
+    async def test_it_settles_the_run_it_was_asked_about(
+        self, idempotency, ledger, clock, tenant, run_id
+    ):
+        action = await _stranded_claim(idempotency, ledger, clock, tenant, run_id)
+        lookup = StubLookup(
+            receipt=ActionReceipt(
+                action_id=action.id,
+                state=IdempotencyState.SUCCEEDED,
+                provider_reference="psp_real_1",
+            )
+        )
+        await clock.advance(timedelta(hours=1))
+
+        report = await _reconciler(idempotency, ledger, clock, lookup).reconcile_run(
+            tenant, run_id
+        )
+
+        assert report.checked == 1
+        assert report.confirmed == 1
+        record = await idempotency.get(action.idempotency_key, tenant)
+        assert record.state is IdempotencyState.SUCCEEDED
+        # Nothing left in doubt, so the run can now be completed.
+        (effect,) = replay_effects(await ledger.read(tenant, run_id))
+        assert not effect.indeterminate
+
+    async def test_it_leaves_every_other_run_alone(
+        self, idempotency, ledger, clock, tenant, run_id
+    ):
+        await _stranded_claim(idempotency, ledger, clock, tenant, run_id)
+        other_tenant, other_run = TenantId.generate(), RunId.generate()
+        other = await _stranded_claim(idempotency, ledger, clock, other_tenant, other_run)
+        lookup = StubLookup(receipt=None)
+        await clock.advance(timedelta(hours=1))
+
+        await _reconciler(idempotency, ledger, clock, lookup).reconcile_run(tenant, run_id)
+
+        # One question asked, about the one run. The sweep is for the rest.
+        assert lookup.calls == 1
+        record = await idempotency.get(other.idempotency_key, other_tenant)
+        assert record.state is IdempotencyState.IN_FLIGHT
+
+    async def test_the_grace_period_still_holds(
+        self, idempotency, ledger, clock, tenant, run_id
+    ):
+        action = await _stranded_claim(idempotency, ledger, clock, tenant, run_id)
+        lookup = StubLookup(receipt=None)
+        await clock.advance(timedelta(minutes=1))
+
+        report = await _reconciler(idempotency, ledger, clock, lookup).reconcile_run(
+            tenant, run_id
+        )
+
+        # Asked this soon, "never seen it" might mean "not yet".
+        assert report.checked == 1
+        assert report.unresolved == 1
+        assert lookup.calls == 0
+        record = await idempotency.get(action.idempotency_key, tenant)
+        assert record.state is IdempotencyState.IN_FLIGHT
+
+    async def test_a_reversal_that_never_came_back_is_resolved_too(
+        self, idempotency, ledger, clock, tenant
+    ):
+        run, action = await _stranded_reversal(idempotency, ledger, clock, tenant)
+        await clock.advance(timedelta(hours=1))
+
+        report = await _reconciler(
+            idempotency, ledger, clock, StubLookup(receipt=None)
+        ).reconcile_run(tenant, run.id)
+
+        # The refund never happened, so the capture is still standing - and
+        # now known to be, rather than waiting on an answer.
+        assert report.not_found == 1
+        (effect,) = replay_effects(await ledger.read(tenant, run.id))
+        assert effect.action_id == action.id
+        entry = (await ledger.read(tenant, run.id))[-1]
+        assert entry.payload["compensation"] is True
+
+    async def test_a_run_with_nothing_in_doubt_asks_nothing(
+        self, idempotency, ledger, clock, tenant, run_id
+    ):
+        executor = ActionExecutor(
+            idempotency=idempotency,
+            dispatcher=RecordingDispatcher(),
+            ledger=ledger,
+            clock=clock,
+        )
+        await executor.execute(
+            Action(
+                id=ActionId.generate(),
+                kind=ActionKind.CAPTURE,
+                description="Clean capture",
+                amount=Money.from_major("500", Currency.INR),
+                idempotency_key=IdempotencyKey.derive("capture", "clean"),
+            ),
+            run_id=run_id,
+            tenant_id=tenant,
+        )
+        lookup = StubLookup(receipt=None)
+        await clock.advance(timedelta(hours=1))
+
+        report = await _reconciler(idempotency, ledger, clock, lookup).reconcile_run(
+            tenant, run_id
+        )
+
+        # The capture could be reversed, but nobody has tried: no claim to ask about.
+        assert report.checked == 0
+        assert lookup.calls == 0
+
+    async def test_a_claim_already_settled_is_not_asked_about_again(
+        self, idempotency, ledger, clock, tenant, run_id
+    ):
+        await _stranded_claim(idempotency, ledger, clock, tenant, run_id)
+        await clock.advance(timedelta(hours=1))
+        await _reconciler(idempotency, ledger, clock, StubLookup(receipt=None)).sweep()
+        lookup = StubLookup(receipt=None)
+
+        report = await _reconciler(idempotency, ledger, clock, lookup).reconcile_run(
+            tenant, run_id
+        )
+
+        assert report.checked == 0
+        assert lookup.calls == 0
+
+    async def test_a_tampered_chain_settles_nothing(
+        self, idempotency, ledger, clock, tenant, run_id
+    ):
+        action = await _stranded_claim(idempotency, ledger, clock, tenant, run_id)
+        chain = ledger._chains[(tenant.value, run_id.value)]
+        dispatched = next(e for e in chain if e.payload.get("amount_minor") is not None)
+        dispatched.payload["amount_minor"] = 1
+        lookup = StubLookup(receipt=None)
+        await clock.advance(timedelta(hours=1))
+
+        with pytest.raises(LedgerIntegrityError):
+            await _reconciler(idempotency, ledger, clock, lookup).reconcile_run(tenant, run_id)
+
+        assert lookup.calls == 0
+        record = await idempotency.get(action.idempotency_key, tenant)
+        assert record.state is IdempotencyState.IN_FLIGHT
 
 
 class TestConfiguration:
