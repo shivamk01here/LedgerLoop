@@ -388,7 +388,7 @@ second = await coordinator.propose(first.run, build_refund("ord_4002", "900"))
 await coordinator.complete(second.run)
 # -> IndeterminateError: 1 effect(s) with no known outcome. still RUNNING.
 
-await reconciler.sweep()
+await reconciler.reconcile_run(tenant, run.id)
 # -> checked=1 confirmed=1 failed=0 not_found=0 unresolved=0 skipped=0
 
 done = await coordinator.complete(second.run, summary="Two duplicate charges refunded")
@@ -400,6 +400,13 @@ doubt cannot get there. The agent that was just told "indeterminate" is the
 party most likely to shrug and call it finished, which is why the check is
 not left to it. A provider that definitely said no is different: that is an
 answer, and a run can finish having been refused something.
+
+`reconcile_run` asks the provider about the claims one run is stuck on and
+nothing else: the effects it never heard back about, and any reversal of its
+effects that went out and never came back. `sweep` does the same for every
+stale claim in every tenant, and is the one to schedule. The grace period
+applies to both, because a provider asked too soon will say it has never
+seen a request that lands a second later.
 
 The total in the closing entry is added up from the run's own ledger, in
 minor units per currency. A refund the reconciler confirmed an hour later
@@ -566,7 +573,7 @@ ledgerloop/
 | Approval gateway | Implemented — role checks, separation of duties, fingerprint binding |
 | Run coordinator — start → propose → gate → halt → resume → complete or fail, plus cancel and operator hold | Implemented |
 | Action executor — exactly-once dispatch | Implemented |
-| Reconciler for in-flight claims | Implemented — reversals included, and a provider still processing is left open |
+| Reconciler for in-flight claims | Implemented — reversals included, a provider still processing is left open, one run on demand or every tenant on a sweep |
 | Compensator — rollback of applied effects | Implemented — exactly-once reversals, refuses to guess, can plan a rollback without running it |
 | Reaper — expiry of halted runs | Implemented — deadline-driven, retires the request behind it |
 | Auditor — a run's ledger read back as what it did | Implemented — verifies the chain first, one record per action, as text or as JSON-ready data |
