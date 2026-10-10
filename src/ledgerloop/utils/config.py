@@ -33,7 +33,9 @@ def load_config(path: str | Path = ".env", apply: bool = True) -> dict[str, str]
             if "=" not in line:
                 continue
             key, _, value = line.partition("=")
-            key = key.strip()
+            key = _parse_key(key)
+            if not key:
+                continue
             config[key] = _parse_value(value)
 
     if apply:
@@ -46,6 +48,20 @@ def load_config(path: str | Path = ".env", apply: bool = True) -> dict[str, str]
                 os.environ[key] = value
 
     return config
+
+
+def _parse_key(raw: str) -> str:
+    """Read the key half of a KEY=VALUE line.
+
+    A line written `export KEY=value` - so the same file can be sourced by a
+    shell - names KEY, not "export KEY". Kept as written, the key matches no
+    variable anybody will ever look up, and the value silently goes nowhere.
+    """
+    key = raw.strip()
+    head, _, rest = key.partition(" ")
+    if head == "export" and rest.strip():
+        key = rest.strip()
+    return key
 
 
 def _parse_value(raw: str) -> str:

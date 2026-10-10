@@ -54,6 +54,33 @@ class TestLoadConfig:
             os.unlink(path)
             del os.environ["EXISTING_KEY"]
 
+class TestShellStyleLines:
+    def test_an_export_prefix_is_not_part_of_the_key(self, tmp_path):
+        # The same file is often `source`d by a shell, which needs the export.
+        path = tmp_path / ".env"
+        path.write_text("export ANTHROPIC_API_KEY=sk-test\n", encoding="utf-8")
+        assert load_config(path, apply=False) == {"ANTHROPIC_API_KEY": "sk-test"}
+
+    def test_an_exported_key_reaches_the_environment(self, tmp_path):
+        path = tmp_path / ".env"
+        path.write_text("export LEDGERLOOP_TEST_EXPORTED=yes\n", encoding="utf-8")
+        try:
+            load_config(path, apply=True)
+            assert os.environ["LEDGERLOOP_TEST_EXPORTED"] == "yes"
+        finally:
+            os.environ.pop("LEDGERLOOP_TEST_EXPORTED", None)
+
+    def test_a_key_that_merely_starts_with_export_is_left_alone(self, tmp_path):
+        path = tmp_path / ".env"
+        path.write_text("EXPORT_FORMAT=csv\nexporter=sftp\n", encoding="utf-8")
+        assert load_config(path, apply=False) == {"EXPORT_FORMAT": "csv", "exporter": "sftp"}
+
+    def test_a_line_with_no_key_is_skipped(self, tmp_path):
+        path = tmp_path / ".env"
+        path.write_text("=orphan\nKEY=value\n", encoding="utf-8")
+        assert load_config(path, apply=False) == {"KEY": "value"}
+
+
 class TestQuotedValues:
     def test_hash_inside_quotes_is_part_of_the_value(self, tmp_path):
         path = tmp_path / ".env"
