@@ -2,6 +2,7 @@
 import pytest
 
 from ledgerloop.llm.openai_provider import OpenAIProvider
+from ledgerloop.llm.provider import is_retryable_status
 
 
 class DummyMessage:
@@ -293,3 +294,15 @@ class TestAnthropicProvider:
         
         assert "tools" in client.messages.last_kwargs
         assert len(client.messages.last_kwargs["tools"]) == 1
+
+
+class TestWhichStatusesAreWorthRetrying:
+    @pytest.mark.parametrize("status", [408, 409, 429, 500, 502, 503, 504, 529])
+    def test_transient_statuses_are_retryable(self, status):
+        # 408 is the one "500 and up" missed: a gateway giving up on a slow
+        # model turn, which is exactly what another attempt tends to fix.
+        assert is_retryable_status(status)
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 413, 422])
+    def test_a_request_that_is_wrong_stays_wrong(self, status):
+        assert not is_retryable_status(status)

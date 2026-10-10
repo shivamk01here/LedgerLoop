@@ -6,7 +6,13 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ledgerloop.llm.provider import LLMError, LLMResponse, TokenUsage, ToolCall
+from ledgerloop.llm.provider import (
+    LLMError,
+    LLMResponse,
+    TokenUsage,
+    ToolCall,
+    is_retryable_status,
+)
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
@@ -175,6 +181,6 @@ class OpenAIProvider:
         if isinstance(exc, openai.APIStatusError):
             return LLMError(
                 f"OpenAI returned {exc.status_code}: {exc}",
-                retryable=exc.status_code >= 500,
+                retryable=is_retryable_status(exc.status_code),
             )
         return LLMError(f"Model call failed: {exc}")

@@ -90,6 +90,17 @@ class LLMError(RuntimeError):
         self.retryable = retryable
 
 
+def is_retryable_status(status_code: int) -> bool:
+    """True when an HTTP status from a model API is worth another attempt.
+
+    The same set both vendor SDKs retry on by themselves: a request timeout,
+    a lock conflict, a rate limit, or anything the server got wrong. "500
+    and up" alone misses the 408 a gateway sends when the model took too
+    long, which is the transport fault a retry most often fixes.
+    """
+    return status_code in (408, 409, 429) or status_code >= 500
+
+
 @runtime_checkable
 class LLMProvider(Protocol):
     """Protocol for a chat-completion backend that supports tool use.

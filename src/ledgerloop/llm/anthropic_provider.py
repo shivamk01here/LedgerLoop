@@ -5,7 +5,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ledgerloop.llm.provider import LLMError, LLMResponse, TokenUsage, ToolCall
+from ledgerloop.llm.provider import (
+    LLMError,
+    LLMResponse,
+    TokenUsage,
+    ToolCall,
+    is_retryable_status,
+)
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
@@ -181,7 +187,7 @@ class AnthropicProvider:
         if isinstance(exc, anthropic.APIStatusError):
             return LLMError(
                 f"Anthropic returned {exc.status_code}: {exc}",
-                retryable=exc.status_code >= 500,
+                retryable=is_retryable_status(exc.status_code),
             )
         if isinstance(exc, anthropic.APIConnectionError):
             return LLMError(f"Could not reach Anthropic: {exc}", retryable=True)
