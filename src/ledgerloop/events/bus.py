@@ -78,7 +78,15 @@ class EventBus:
             for pattern, handlers in list(self._handlers.items())
             if self._matches(pattern, event.topic)
         ]
-        targets = [handler for handlers in matched for handler in list(handlers)]
+        # Once per event, however many of its patterns matched. Subscribing
+        # the same handler twice under one pattern was already a no-op;
+        # under "*" and "agent.*" it ran twice, and a handler that counts or
+        # forwards events double-counted every agent event.
+        targets: list[EventHandler] = []
+        for handlers in matched:
+            for handler in list(handlers):
+                if handler not in targets:
+                    targets.append(handler)
 
         invoked = 0
         for handler in targets:

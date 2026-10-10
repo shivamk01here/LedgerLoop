@@ -33,6 +33,40 @@ class TestEventBus:
         assert len(received) == 1
 
     @pytest.mark.asyncio
+    async def test_a_handler_matched_by_two_patterns_runs_once(self, event_bus):
+        received = []
+
+        async def handler(event: Event):
+            received.append(event.topic)
+
+        event_bus.subscribe("*", handler)
+        event_bus.subscribe("agent.*", handler)
+        event_bus.subscribe("agent.run.started", handler)
+        count = await event_bus.emit(Event(topic="agent.run.started"))
+
+        # A counter subscribed broadly and narrowly would otherwise count
+        # every agent event three times.
+        assert received == ["agent.run.started"]
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_different_handlers_on_overlapping_patterns_each_run(self, event_bus):
+        received = []
+
+        async def first(event: Event):
+            received.append("first")
+
+        async def second(event: Event):
+            received.append("second")
+
+        event_bus.subscribe("*", first)
+        event_bus.subscribe("agent.*", second)
+        count = await event_bus.emit(Event(topic="agent.run.started"))
+
+        assert sorted(received) == ["first", "second"]
+        assert count == 2
+
+    @pytest.mark.asyncio
     async def test_wildcard_subscription(self, event_bus):
         received = []
 
