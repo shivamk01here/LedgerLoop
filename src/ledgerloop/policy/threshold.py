@@ -19,6 +19,11 @@ Three invariants hold regardless of configuration:
 The engine is pure and deterministic. The same action under the same
 configuration always produces the same decision, which is what makes replay
 and audit meaningful.
+
+It also explains itself. `explain` returns the decision `evaluate` would,
+along with every rule it was held against and why each did or did not
+match - built from the same check `evaluate` uses, so the two cannot
+disagree.
 """
 
 from __future__ import annotations
@@ -35,7 +40,13 @@ if TYPE_CHECKING:
 
     from ledgerloop.core.models import Run
 
-__all__ = ["PolicyRule", "ThresholdPolicy", "ThresholdPolicyEngine"]
+__all__ = [
+    "PolicyExplanation",
+    "PolicyRule",
+    "RuleCheck",
+    "ThresholdPolicy",
+    "ThresholdPolicyEngine",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,23 +84,94 @@ class PolicyRule:
 
     def matches(self, action: Action) -> bool:
         """True when this rule applies to `action`."""
+        return self.mismatch(action) is None
+
+    def mismatch(self, action: Action) -> str | None:
+        """Why this rule does not apply to `action`, or None when it does.
+
+        `matches` is this and nothing else, so an explanation built from it
+        can never disagree with the decision it is explaining.
+        """
         if self.kinds is not None and action.kind not in self.kinds:
-            return False
+            kinds = ", ".join(sorted(kind.value for kind in self.kinds))
+            return f"kind {action.kind.value} is not one of {kinds}"
 
         bound = self.min_amount or self.max_amount
         if bound is None:
-            return True
+            return None
 
         # An amount bound cannot be evaluated against an action that has no
         # amount, and a rule about money must not silently catch one.
         if action.amount is None:
-            return False
+            return "the rule bounds an amount and the action carries none"
         if action.amount.currency is not bound.currency:
-            return False
+            return f"{action.amount} is not in {bound.currency.value}"
 
         if self.min_amount is not None and action.amount < self.min_amount:
-            return False
-        return not (self.max_amount is not None and action.amount >= self.max_amount)
+            return f"{action.amount} is below the minimum of {self.min_amount}"
+        if self.max_amount is not None and action.amount >= self.max_amount:
+            return f"{action.amount} is at or above the maximum of {self.max_amount}"
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class RuleCheck:
+    """One rule held against one action."""
+
+    rule_id: str
+    effect: PolicyEffect
+    matched: bool
+    why: str
+    """"matched", or the first condition the action failed."""
+    deciding: bool = False
+    """True for the first rule that matched - the only one that counts."""
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyExplanation:
+    """A policy decision, with the working shown.
+
+    `decision` is the one `evaluate` returns for the same action, run and
+    policy. The rest says how it was reached: every rule in order and why it
+    did or did not match, and whether a backstop overrode what the rules
+    said.
+    """
+
+    decision: PolicyDecision
+    checks: tuple[RuleCheck, ...] = ()
+    fell_through: bool = False
+    """No rule matched, so the tenant default decided."""
+    ceiling_breach: str | None = None
+    """Why the auto-approval ceiling wanted a human, when it did. Not checked
+    at all once a rule has denied the action."""
+    ceiling_overrode: bool = False
+    """The ceiling made the decision - over a rule that would have allowed the
+    action, or in place of the tenant default when no rule matched."""
+    critical_guard: bool = False
+    """The CRITICAL guard turned an ALLOW into a request for approval."""
+
+    @property
+    def deciding_rule(self) -> RuleCheck | None:
+        return next((check for check in self.checks if check.deciding), None)
+
+    def render(self) -> str:
+        """The working, as plain text for a person."""
+        decision = self.decision
+        lines = [
+            f"{decision.effect.value} at {decision.risk_tier.value} risk"
+            f" by {decision.rule_id} - {decision.reason}"
+        ]
+        for check in self.checks:
+            mark = "->" if check.deciding else "  "
+            lines.append(f"  {mark} {check.rule_id} ({check.effect.value}): {check.why}")
+        if self.fell_through:
+            lines.append("  -> no rule matched; the tenant default decided")
+        if self.ceiling_breach is not None:
+            verdict = "decided" if self.ceiling_overrode else "raised the risk"
+            lines.append(f"  ceiling {verdict}: {self.ceiling_breach}")
+        if self.critical_guard:
+            lines.append("  critical guard: a CRITICAL action is never allowed outright")
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +269,7 @@ class ThresholdPolicyEngine:
         """
         del at  # reserved for velocity and time-window rules
 
-        policy = self._per_tenant.get(run.tenant_id.value, self._default)
+        policy = self._policy_for(run)
         risk = self.classify(action, policy)
         rule = next((r for r in policy.rules if r.matches(action)), None)
         effect = policy.default_effect if rule is None else rule.effect
@@ -221,6 +303,55 @@ class ThresholdPolicyEngine:
             effect = PolicyEffect.REQUIRE_APPROVAL
 
         return self._decide(effect, risk, rule, policy)
+
+    async def explain(self, action: Action, run: Run, *, at: datetime) -> PolicyExplanation:
+        """Rule on `action` exactly as `evaluate` would, and show the working.
+
+        For the operator asking why a refund was gated, or why it was not:
+        every rule in the tenant's order with the condition the action failed
+        or "matched", which one decided, and whether the ceiling or the
+        CRITICAL guard stepped in over it. Pure, like `evaluate`, and nothing
+        is ledgered - explaining a decision is not making one.
+        """
+        decision = await self.evaluate(action, run, at=at)
+        policy = self._policy_for(run)
+
+        checks: list[RuleCheck] = []
+        deciding: PolicyRule | None = None
+        for rule in policy.rules:
+            why = rule.mismatch(action)
+            is_first = why is None and deciding is None
+            if is_first:
+                deciding = rule
+            checks.append(
+                RuleCheck(
+                    rule_id=rule.rule_id,
+                    effect=rule.effect,
+                    matched=why is None,
+                    why=why or "matched",
+                    deciding=is_first,
+                )
+            )
+
+        effect = policy.default_effect if deciding is None else deciding.effect
+        breach = None if effect is PolicyEffect.DENY else self._ceiling_breach(action, policy)
+        ceiling_overrode = decision.rule_id == "ceiling"
+        return PolicyExplanation(
+            decision=decision,
+            checks=tuple(checks),
+            fell_through=deciding is None,
+            ceiling_breach=breach,
+            ceiling_overrode=ceiling_overrode,
+            critical_guard=(
+                effect is PolicyEffect.ALLOW
+                and not ceiling_overrode
+                and decision.effect is PolicyEffect.REQUIRE_APPROVAL
+            ),
+        )
+
+    def _policy_for(self, run: Run) -> ThresholdPolicy:
+        """The run's tenant's rule set, or the default when it has none."""
+        return self._per_tenant.get(run.tenant_id.value, self._default)
 
     @staticmethod
     def _decide(
