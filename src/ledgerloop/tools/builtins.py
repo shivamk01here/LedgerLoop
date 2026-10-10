@@ -7,6 +7,7 @@ import base64
 import datetime
 import hashlib
 import json
+import math
 import operator
 import random
 import re
@@ -470,8 +471,15 @@ class SleepTool(BaseTool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         seconds = kwargs["seconds"]
-        if not isinstance(seconds, (int, float)):
+        # A bool is an int to Python and not a duration to anyone. NaN fails
+        # both range checks below - every comparison with it is false - and
+        # asyncio.sleep(nan) never returns, so the 60-second cap would hold
+        # for everything except the one value that hangs the agent outright.
+        # json.loads accepts a bare NaN, so a model can send one.
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
             return ToolResult.fail("seconds must be a number")
+        if not math.isfinite(seconds):
+            return ToolResult.fail("seconds must be a finite number")
         if seconds < 0:
             return ToolResult.fail("Cannot sleep for a negative duration")
         if seconds > 60:

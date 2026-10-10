@@ -1,5 +1,6 @@
 """Tests for built-in tools."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -363,6 +364,32 @@ class TestSleepTool:
         
         result = await tool.execute(seconds=100)
         assert result.success is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("seconds", [float("nan"), float("inf"), float("-inf")])
+    async def test_a_non_finite_duration_is_refused_without_sleeping(self, seconds):
+        tool = SleepTool()
+        # NaN slips past both range checks, and sleeping on it never returns.
+        with patch('asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+            result = await tool.execute(seconds=seconds)
+        assert result.success is False
+        mock_sleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_model_sending_nan_through_json_is_refused(self):
+        # json.loads takes a bare NaN, so this is what a provider hands over.
+        arguments = json.loads('{"seconds": NaN}')
+        with patch('asyncio.sleep', new_callable=AsyncMock):
+            result = await SleepTool().execute(**arguments)
+        assert result.success is False
+        assert "finite" in result.error
+
+    @pytest.mark.asyncio
+    async def test_a_bool_is_not_a_duration(self):
+        with patch('asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+            result = await SleepTool().execute(seconds=True)
+        assert result.success is False
+        mock_sleep.assert_not_called()
 
 class TestStringLengthTool:
     @pytest.mark.asyncio
