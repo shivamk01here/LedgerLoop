@@ -31,7 +31,7 @@ from ledgerloop.core.models import Action, Run, RunSpec
 from ledgerloop.core.money import Money
 from ledgerloop.policy import ThresholdPolicyEngine
 from ledgerloop.runtime import ActionExecutor, RunCoordinator
-from ledgerloop.runtime.reaper import Reaper, ReaperReport
+from ledgerloop.runtime.reaper import PendingExpiry, Reaper, ReaperReport
 
 AT = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 DEADLINE = AT + timedelta(days=3)
@@ -318,3 +318,116 @@ class TestTheSweep:
         assert "checked=3" in str(report)
         assert "expired=2" in str(report)
         assert "skipped=1" in str(report)
+
+
+class TestPreviewingASweep:
+    async def test_it_names_the_run_and_the_request_behind_it(
+        self, reaper, coordinator, runs, tenant, clock
+    ):
+        halted, _ = await _halted(coordinator, runs, tenant)
+        await clock.advance(timedelta(days=7))
+
+        due = await reaper.preview()
+
+        assert due == (
+            PendingExpiry(
+                run_id=halted.run.id,
+                tenant_id=tenant,
+                halted_in=RunState.AWAITING_APPROVAL,
+                deadline=DEADLINE,
+                overdue_by=timedelta(days=4),
+                approval_id=halted.approval_id,
+                retires_approval=True,
+            ),
+        )
+
+    async def test_previewing_expires_nothing(
+        self, reaper, coordinator, runs, gateway, ledger, tenant, clock
+    ):
+        halted, _ = await _halted(coordinator, runs, tenant)
+        await clock.advance(timedelta(days=7))
+        chain_before = await ledger.read(tenant, halted.run.id)
+
+        await reaper.preview()
+
+        stored = await runs.get(tenant, halted.run.id)
+        assert stored.state is RunState.AWAITING_APPROVAL
+        assert stored.version == halted.run.version
+        request = await gateway.get(tenant, halted.approval_id)
+        assert request.state is ApprovalState.PENDING
+        assert await ledger.read(tenant, halted.run.id) == chain_before
+
+    async def test_the_sweep_that_follows_does_what_it_said(
+        self, reaper, coordinator, runs, clock
+    ):
+        await _halted(coordinator, runs, TenantId.generate())
+        await _halted(coordinator, runs, TenantId.generate())
+        await clock.advance(timedelta(days=7))
+
+        due = await reaper.preview()
+        report = await reaper.sweep()
+
+        assert len(due) == report.expired == 2
+        assert sum(item.retires_approval for item in due) == report.approvals_retired
+
+    async def test_a_request_already_decided_is_not_counted_as_retired(
+        self, reaper, coordinator, runs, gateway, tenant, clock
+    ):
+        # Granted just inside the deadline, but nobody resumed the run. The
+        # sweep still ends the run; it leaves the reviewer's decision alone.
+        halted, _ = await _halted(coordinator, runs, tenant)
+        await gateway.submit(
+            tenant, halted.approval_id, approved=True, actor=APPROVER, at=clock.now()
+        )
+        await clock.advance(timedelta(days=7))
+
+        (item,) = await reaper.preview()
+        report = await reaper.sweep()
+
+        assert item.approval_id == halted.approval_id
+        assert item.retires_approval is False
+        assert report.approvals_retired == 0
+
+    async def test_a_held_run_has_no_request_to_retire(
+        self, reaper, coordinator, runs, tenant, clock
+    ):
+        run = await runs.create(
+            RunSpec(tenant_id=tenant, objective="Wait out the incident", deadline=DEADLINE)
+        )
+        run = await runs.save(run.start(at=AT), expected_version=0)
+        await coordinator.suspend(run, reason="Provider incident")
+        await clock.advance(timedelta(days=7))
+
+        (item,) = await reaper.preview()
+
+        assert item.halted_in is RunState.SUSPENDED
+        assert item.approval_id is None
+        assert item.retires_approval is False
+
+    async def test_a_run_inside_its_deadline_is_not_listed(
+        self, reaper, coordinator, runs, tenant, clock
+    ):
+        await _halted(coordinator, runs, tenant)
+        await clock.advance(timedelta(days=1))
+
+        assert await reaper.preview() == ()
+
+    async def test_a_run_that_moved_on_is_not_listed(
+        self, coordinator, runs, gateway, ledger, tenant, clock
+    ):
+        # The sweep would skip it, so a preview that listed it would be
+        # promising an expiry that is not going to happen.
+        halted, action = await _halted(coordinator, runs, tenant)
+        await gateway.submit(
+            tenant, halted.approval_id, approved=True, actor=APPROVER, at=clock.now()
+        )
+        resumed = await coordinator.resume(halted.run, action)
+        stale = Reaper(
+            runs=_StaleRunStore(runs, resumed.run),
+            approvals=gateway,
+            ledger=ledger,
+            clock=clock,
+        )
+        await clock.advance(timedelta(days=7))
+
+        assert await stale.preview() == ()
