@@ -25,6 +25,7 @@ class TestTopLevelExports:
             "Compensator",
             "Reaper",
             "ReaperReport",
+            "PendingExpiry",
             "CompensationReport",
             "CompensationPlan",
             "PlannedReversal",

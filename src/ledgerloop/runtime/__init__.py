@@ -11,7 +11,7 @@ from ledgerloop.runtime.compensator import (
 from ledgerloop.runtime.coordinator import ActionResult, RunCoordinator
 from ledgerloop.runtime.effects import AppliedEffect, replay_effects, value_by_currency
 from ledgerloop.runtime.executor import ActionExecutor, ExecutionOutcome
-from ledgerloop.runtime.reaper import Reaper, ReaperReport
+from ledgerloop.runtime.reaper import PendingExpiry, Reaper, ReaperReport
 from ledgerloop.runtime.reconciler import ProviderLookup, Reconciler, ReconciliationReport
 
 __all__ = [
@@ -25,6 +25,7 @@ __all__ = [
     "CompensationReport",
     "Compensator",
     "ExecutionOutcome",
+    "PendingExpiry",
     "PlannedReversal",
     "ProviderLookup",
     "Reaper",
