@@ -222,6 +222,23 @@ class TestClocks:
 
         assert marks == [AT + timedelta(seconds=10), AT + timedelta(seconds=20)]
 
+    async def test_waking_a_sleeper_that_set_jumped_past_does_not_rewind_time(self, clock):
+        seen: list[datetime] = []
+
+        async def worker() -> None:
+            await clock.sleep(60)
+            seen.append(clock.now())
+
+        task = asyncio.create_task(worker())
+        await asyncio.sleep(0)
+        clock.set(AT + timedelta(hours=1))
+
+        await clock.advance(timedelta(0))
+        await task
+
+        assert seen == [AT + timedelta(hours=1)]
+        assert clock.now() == AT + timedelta(hours=1)
+
     async def test_zero_length_sleep_returns_immediately(self, clock):
         await clock.sleep(0)
         assert clock.pending_sleepers == 0

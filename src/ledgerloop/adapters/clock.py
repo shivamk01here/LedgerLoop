@@ -90,8 +90,11 @@ class ManualClock:
             deadline, _, future = heapq.heappop(self._waiters)
             # Step the clock to each waiter's deadline rather than jumping
             # straight to the target, so a task that wakes and sleeps again
-            # measures its next interval from the right moment.
-            self._now = deadline
+            # measures its next interval from the right moment. Never behind
+            # where it already is, though: `set` moves time without waking
+            # anyone, so a deadline still in the heap can be in the past, and
+            # its sleeper woke late rather than early.
+            self._now = max(self._now, deadline)
             if not future.done():
                 future.set_result(None)
             # Let the woken task run before deciding what else is due.
