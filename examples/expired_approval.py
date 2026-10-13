@@ -95,6 +95,13 @@ async def main() -> None:
 
     # --- ...and the human never comes -------------------------------------
     await clock.advance(timedelta(days=6))
+
+    # Expiry cannot be undone, so look first. Nothing moves yet.
+    for due in await reaper.preview():
+        retires = due.approval_id if due.retires_approval else "nothing"
+        print(f"\npreview       -> would expire {due.run_id} ({due.halted_in.value})")
+        print(f"              {due.overdue_by} past its deadline, would retire {retires}")
+
     report = await reaper.sweep()
     print(f"\nsweep         -> {report}")
 
