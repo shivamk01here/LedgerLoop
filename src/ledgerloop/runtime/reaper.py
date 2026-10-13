@@ -24,6 +24,10 @@ Nothing here reverses anything. A run that halted may well have moved money
 before it did, and walking that back is the compensator's job, not this
 one's. Expiring a run says the decision is never coming; it does not say the
 world is unchanged.
+
+Expiry is one-way, so the sweep can also be asked what it would do first.
+`preview` reads the same runs and writes nothing, for an operator who wants
+to see whose sign-off is about to stop mattering before it stops mattering.
 """
 
 from __future__ import annotations
@@ -32,19 +36,40 @@ import logging
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from ledgerloop.core.enums import LedgerEventType
+from ledgerloop.core.enums import ApprovalState, LedgerEventType
 from ledgerloop.core.errors import ConcurrencyError, LedgerloopError, StateTransitionError
 
 if TYPE_CHECKING:
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
-    from ledgerloop.core.ids import ApprovalId
+    from ledgerloop.core.enums import RunState
+    from ledgerloop.core.ids import ApprovalId, RunId, TenantId
     from ledgerloop.core.models import Run
     from ledgerloop.core.ports import ApprovalGateway, Clock, LedgerStore, RunStore
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Reaper", "ReaperReport"]
+__all__ = ["PendingExpiry", "Reaper", "ReaperReport"]
+
+
+@dataclass(frozen=True, slots=True)
+class PendingExpiry:
+    """One run a sweep would expire now, and what it would retire with it."""
+
+    run_id: RunId
+    tenant_id: TenantId
+    halted_in: RunState
+    """AWAITING_APPROVAL or SUSPENDED - what the run is stuck on."""
+    deadline: datetime | None
+    overdue_by: timedelta | None
+    """How far past its deadline it already is. None only when the store
+    handed back a run with no deadline, which the sweep would still end."""
+    approval_id: ApprovalId | None = None
+    """The request the run is waiting on, if it is waiting on one."""
+    retires_approval: bool = False
+    """True when that request is still pending, so the sweep would take it
+    out of a reviewer's queue. A reviewer who already decided keeps their
+    decision, and this is False."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +141,52 @@ class Reaper:
         if report.checked:
             logger.info("Expiry sweep complete: %s", report)
         return report
+
+    async def preview(self, *, limit: int = 100) -> tuple[PendingExpiry, ...]:
+        """Say which runs `sweep` would expire now, without expiring any.
+
+        Reads the same runs the sweep would, in the same order and with the
+        same limit, and leaves out the same ones - a run that is no longer
+        halted would be skipped, so it is not listed. Moves no run, retires
+        no request and writes nothing to any ledger.
+
+        A preview is a reading, not a reservation. A reviewer can still
+        decide, or a worker resume a run, between this and the sweep, and
+        the sweep's version check decides again from what it finds then.
+
+        Args:
+            limit: Most runs to look at, as for `sweep`.
+
+        Returns:
+            One entry per run, in the order the sweep would take them.
+        """
+        now = self._clock.now()
+        due: list[PendingExpiry] = []
+
+        async for run in self._runs.find_expired(as_of=now, limit=limit):
+            if not run.state.is_halted:
+                continue
+            deadline = run.spec.deadline
+            due.append(
+                PendingExpiry(
+                    run_id=run.id,
+                    tenant_id=run.tenant_id,
+                    halted_in=run.state,
+                    deadline=deadline,
+                    overdue_by=None if deadline is None else now - deadline,
+                    approval_id=run.pending_approval_id,
+                    retires_approval=await self._still_pending(run),
+                )
+            )
+
+        return tuple(due)
+
+    async def _still_pending(self, run: Run) -> bool:
+        """True when the request behind `run` is one `_retire` would expire."""
+        if run.pending_approval_id is None:
+            return False
+        request = await self._approvals.get(run.tenant_id, run.pending_approval_id)
+        return request is not None and request.state is ApprovalState.PENDING
 
     async def _expire(self, run: Run, report: ReaperReport, *, at: datetime) -> ReaperReport:
         """End one run and retire whatever it was waiting on."""
