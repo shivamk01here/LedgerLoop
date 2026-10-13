@@ -313,6 +313,23 @@ meantime. Either way `DeadlineExceededError` is raised and nothing is
 dispatched. The approval's own expiry window does not change that: the run's
 deadline is when the case stops mattering, whatever the request still allows.
 
+Expiry cannot be undone, so the reaper will also say what a sweep would do
+before it does it. `preview()` reads the same runs in the same order and
+writes nothing:
+
+```python
+for due in await reaper.preview():
+    print(due.run_id, due.halted_in, due.overdue_by, due.retires_approval)
+# -> run_65c8... awaiting_approval 1 day, 0:00:00 True
+```
+
+Each entry names the run, what it is halted in, how far past its deadline it
+is, and the request it is waiting on. `retires_approval` is only true while
+that request is still pending; a reviewer who already decided keeps their
+decision, and the sweep leaves it alone. A preview is a reading, not a
+reservation — a run resumed between the preview and the sweep is skipped by
+the sweep, exactly as it would have been without one.
+
 Expiry is opt-in: a run whose `RunSpec` carries no deadline is never swept.
 And nothing here reverses anything — a run may well have moved money before
 it halted, and walking that back is the compensator's job.
@@ -584,7 +601,7 @@ ledgerloop/
 | Action executor — exactly-once dispatch | Implemented |
 | Reconciler for in-flight claims | Implemented — reversals included, a provider still processing is left open, one run on demand or every tenant on a sweep |
 | Compensator — rollback of applied effects | Implemented — exactly-once reversals, refuses to guess, can plan a rollback without running it |
-| Reaper — expiry of halted runs | Implemented — deadline-driven, retires the request behind it |
+| Reaper — expiry of halted runs | Implemented — deadline-driven, retires the request behind it, can preview a sweep without running it |
 | Auditor — a run's ledger read back as what it did | Implemented — verifies the chain first, one record per action, as text or as JSON-ready data |
 | Run value ceiling | Implemented — checked before dispatch and approval, counts unanswered effects |
 | Idempotency, ledger, run, step stores | Implemented **in memory only** |
