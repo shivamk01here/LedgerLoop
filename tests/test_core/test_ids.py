@@ -37,6 +37,13 @@ class TestIdentifier:
         with pytest.raises(ValueError, match="1-128 characters"):
             RunId("run with spaces")
 
+    @pytest.mark.parametrize("raw", ["run_abc\n", "run_abc\r\n", "\nrun_abc"])
+    def test_a_line_break_is_rejected_wherever_it_falls(self, raw):
+        # A trailing newline used to pass: "run_abc\n" and "run_abc" are
+        # different keys to every store, and the first one forges log lines.
+        with pytest.raises(ValueError, match="1-128 characters"):
+            RunId(raw)
+
     def test_overlong_value_rejected(self):
         with pytest.raises(ValueError):
             RunId("r" * 129)

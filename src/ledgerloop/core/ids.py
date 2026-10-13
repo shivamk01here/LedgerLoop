@@ -31,7 +31,9 @@ __all__ = [
 ]
 
 _TOKEN_BYTES: Final = 16
-_IDENTIFIER_PATTERN: Final = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+# Used with fullmatch. An anchored match is not the same thing: `$` also
+# matches just before a trailing newline, so "run_abc\n" got through.
+_IDENTIFIER_PATTERN: Final = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -51,7 +53,7 @@ class Identifier:
     def __post_init__(self) -> None:
         if not self.value:
             raise ValueError(f"{type(self).__name__} cannot be empty")
-        if not _IDENTIFIER_PATTERN.match(self.value):
+        if not _IDENTIFIER_PATTERN.fullmatch(self.value):
             raise ValueError(
                 f"{type(self).__name__} must be 1-128 characters of "
                 f"[A-Za-z0-9_.:-], got {self.value!r}"
