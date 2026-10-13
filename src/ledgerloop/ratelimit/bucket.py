@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 
 
@@ -23,8 +24,8 @@ class TokenBucket:
         """
         if capacity <= 0:
             raise ValueError("capacity must be positive")
-        if refill_rate <= 0:
-            raise ValueError("refill_rate must be positive")
+        if not (0 < refill_rate < math.inf):
+            raise ValueError("refill_rate must be positive and finite")
 
         self._capacity = capacity
         self._refill_rate = refill_rate

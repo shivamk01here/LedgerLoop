@@ -44,6 +44,11 @@ class TestRateLimitConfig:
         with pytest.raises(ValueError, match="window_seconds"):
             RateLimitConfig(window_seconds=-1)
 
+    @pytest.mark.parametrize("window", [float("nan"), float("inf")])
+    def test_a_window_that_is_not_finite_is_refused(self, window):
+        with pytest.raises(ValueError, match="window_seconds"):
+            RateLimitConfig(window_seconds=window)
+
     def test_invalid_burst(self):
         with pytest.raises(ValueError, match="burst"):
             RateLimitConfig(burst=0)
@@ -82,6 +87,12 @@ class TestTokenBucket:
     def test_invalid_refill_rate(self):
         with pytest.raises(ValueError, match="refill_rate"):
             TokenBucket(capacity=1, refill_rate=0)
+
+    def test_a_nan_refill_rate_does_not_make_the_bucket_bottomless(self):
+        # min(capacity, tokens + elapsed * nan) is capacity, so a bucket that
+        # took NaN refilled to full on every read and never refused anyone.
+        with pytest.raises(ValueError, match="refill_rate"):
+            TokenBucket(capacity=1, refill_rate=float("nan"))
 
     def test_reset(self):
         b = TokenBucket(capacity=3, refill_rate=1.0)

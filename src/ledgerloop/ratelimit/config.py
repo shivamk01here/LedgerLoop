@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -23,7 +24,9 @@ class RateLimitConfig:
     def __post_init__(self) -> None:
         if self.max_requests <= 0:
             raise ValueError("max_requests must be positive")
-        if self.window_seconds <= 0:
-            raise ValueError("window_seconds must be positive")
+        # Written so NaN fails it: every comparison with NaN is false, and a
+        # NaN window used to pass `<= 0` and switch the limit off entirely.
+        if not (0 < self.window_seconds < math.inf):
+            raise ValueError("window_seconds must be positive and finite")
         if self.burst is not None and self.burst <= 0:
             raise ValueError("burst must be positive when provided")
