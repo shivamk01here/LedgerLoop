@@ -166,6 +166,13 @@ class TestMemoryEngine:
             await engine.store("k", "v", ttl_seconds=-1)
 
     @pytest.mark.asyncio
+    async def test_a_nan_ttl_is_refused_rather_than_kept_forever(self):
+        engine = MemoryEngine(namespace="test")
+        with pytest.raises(ValueError, match="ttl_seconds"):
+            await engine.store("k", "v", ttl_seconds=float("nan"))
+        assert await engine.retrieve("k") is None
+
+    @pytest.mark.asyncio
     async def test_expired_entries_purged_from_backend(self):
         engine = MemoryEngine(namespace="test")
         await engine.store("alive", "yes")

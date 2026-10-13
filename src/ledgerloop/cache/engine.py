@@ -95,7 +95,14 @@ class CacheEngine:
             value: The value to cache.
             ttl: Optional time-to-live in seconds. None means permanent.
             tags: Optional tags for filtering.
+
+        Raises:
+            ValueError: `ttl` was negative or NaN.
         """
+        # Not `ttl < 0`: NaN fails every comparison, and an entry whose expiry
+        # is compared against NaN is never expired - it would be permanent.
+        if ttl is not None and not ttl >= 0:
+            raise ValueError("ttl must be non-negative")
         prefixed = self._prefixed(key)
         entry = CacheEntry(
             key=prefixed,

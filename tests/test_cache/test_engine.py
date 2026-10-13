@@ -83,6 +83,16 @@ class TestCacheEngine:
         assert result == "value"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("ttl", [-1, float("nan")])
+    async def test_a_ttl_that_is_negative_or_nan_is_refused(self, ttl):
+        # A NaN ttl used to be stored and never expire; a negative one was
+        # stored already expired, so the set looked fine and the get missed.
+        engine = CacheEngine(namespace="test")
+        with pytest.raises(ValueError, match="ttl"):
+            await engine.set("k", "v", ttl=ttl)
+        assert await engine.get("k") is None
+
+    @pytest.mark.asyncio
     async def test_search_by_tag(self):
         engine = CacheEngine(namespace="test")
         await engine.set("k1", "v1", tags=["important"])
