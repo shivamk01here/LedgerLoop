@@ -5,6 +5,7 @@ written around the ways that decision could be wrong in a customer's favour
 and against ours.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -288,6 +289,98 @@ class TestPolicyRule:
             idempotency_key=IdempotencyKey.derive("refund", "usd"),
         )
         assert not rule.matches(usd)
+
+
+def _paying(counterparty: str | None, amount: str = "1000") -> Action:
+    return replace(_action(ActionKind.REFUND, amount), counterparty=counterparty)
+
+
+def _rule(
+    effect: PolicyEffect, *counterparties: str, max_amount: Money | None = None
+) -> PolicyRule:
+    return PolicyRule(
+        effect=effect,
+        reason=f"{effect.value} for named counterparties",
+        rule_id=f"{effect.value}-named",
+        counterparties=frozenset(counterparties),
+        max_amount=max_amount,
+    )
+
+
+class TestCounterpartyRules:
+    def test_a_rule_matches_a_counterparty_it_names(self):
+        rule = _rule(PolicyEffect.DENY, "mer_1", "mer_2")
+        assert rule.matches(_paying("mer_2"))
+
+    def test_it_is_an_exact_match_not_a_prefix(self):
+        rule = _rule(PolicyEffect.DENY, "mer_1")
+        assert not rule.matches(_paying("mer_12"))
+        assert rule.mismatch(_paying("mer_12")) == "counterparty mer_12 is not one of mer_1"
+
+    def test_it_does_not_match_an_action_that_names_nobody(self):
+        rule = _rule(PolicyEffect.DENY, "mer_1")
+        assert rule.mismatch(_paying(None)) == (
+            "the rule names counterparties and the action names none"
+        )
+
+    def test_a_rule_without_counterparties_still_matches_anyone(self):
+        rule = PolicyRule(effect=PolicyEffect.ALLOW, reason="Anyone", rule_id="r1")
+        assert rule.matches(_paying("mer_1"))
+        assert rule.matches(_paying(None))
+
+    def test_a_bare_string_is_refused_rather_than_read_as_a_substring(self):
+        with pytest.raises(TypeError, match="frozenset"):
+            PolicyRule(
+                effect=PolicyEffect.DENY,
+                reason="Frozen",
+                rule_id="r1",
+                counterparties="mer_1",  # type: ignore[arg-type]
+            )
+
+    def test_an_empty_set_that_could_never_match_is_refused(self):
+        with pytest.raises(ValueError, match="empty set of counterparties"):
+            _rule(PolicyEffect.DENY)
+
+    async def test_a_frozen_merchant_is_denied_even_a_small_refund(self, run):
+        policy = ThresholdPolicy.conservative()
+        frozen = _rule(PolicyEffect.DENY, "mer_frozen")
+        engine = ThresholdPolicyEngine(
+            default_policy=replace(policy, rules=(frozen, *policy.rules))
+        )
+
+        blocked = await engine.evaluate(_paying("mer_frozen", "100"), run, at=AT)
+        other = await engine.evaluate(_paying("mer_1", "100"), run, at=AT)
+
+        assert blocked.effect is PolicyEffect.DENY
+        assert blocked.rule_id == "deny-named"
+        assert other.effect is PolicyEffect.ALLOW
+
+    async def test_an_allow_list_sends_strangers_to_a_human(self, run):
+        known = _rule(
+            PolicyEffect.ALLOW,
+            "mer_1",
+            max_amount=Money.from_major("5000", Currency.INR),
+        )
+        engine = ThresholdPolicyEngine(default_policy=ThresholdPolicy(rules=(known,)))
+
+        assert (await engine.evaluate(_paying("mer_1"), run, at=AT)).effect is (
+            PolicyEffect.ALLOW
+        )
+        stranger = await engine.evaluate(_paying("mer_new"), run, at=AT)
+        assert stranger.effect is PolicyEffect.REQUIRE_APPROVAL
+        assert stranger.rule_id == "default"
+
+    async def test_the_explanation_says_the_counterparty_is_why(self, run):
+        engine = ThresholdPolicyEngine(
+            default_policy=ThresholdPolicy(rules=(_rule(PolicyEffect.DENY, "mer_frozen"),))
+        )
+
+        explanation = await engine.explain(_paying("mer_1"), run, at=AT)
+
+        (check,) = explanation.checks
+        assert check.matched is False
+        assert check.why == "counterparty mer_1 is not one of mer_frozen"
+        assert explanation.fell_through
 
 
 class TestApprovalGateway:
