@@ -71,7 +71,7 @@ class Money:
             The amount, rounded half-to-even to the currency's exponent.
 
         Raises:
-            TypeError: `amount` was a float.
+            TypeError: `amount` was a float or a bool.
             ValueError: `amount` could not be parsed, or carried more
                 precision than the currency permits.
         """
@@ -80,6 +80,11 @@ class Money:
                 "Money.from_major does not accept float - pass a str or Decimal. "
                 "Floats cannot represent decimal amounts exactly."
             )
+        if isinstance(amount, bool):
+            # An int to Python and to Decimal, so True would be one whole
+            # unit of the currency. The constructor and `times` already
+            # refuse it; this was the one way in that did not.
+            raise TypeError("Money.from_major does not accept bool")
         try:
             value = Decimal(amount)
         except (InvalidOperation, ValueError) as exc:

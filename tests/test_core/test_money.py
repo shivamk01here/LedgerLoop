@@ -51,6 +51,13 @@ class TestConstruction:
         with pytest.raises(TypeError):
             Money(True, Currency.INR)
 
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_from_major_does_not_read_a_bool_as_an_amount(self, flag):
+        # True used to come out as 1.00 INR - a flag that reached an amount
+        # field became a real refund of one rupee.
+        with pytest.raises(TypeError, match="bool"):
+            Money.from_major(flag, Currency.INR)
+
     def test_zero_helper(self):
         assert Money.zero(Currency.EUR) == Money(0, Currency.EUR)
 
