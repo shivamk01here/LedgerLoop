@@ -69,11 +69,25 @@ class PolicyRule:
     """Exclusive upper bound. The rule matches strictly below this amount."""
     approver_role: str | None = None
     """Required for REQUIRE_APPROVAL rules."""
+    counterparties: frozenset[str] | None = None
+    """Counterparties this rule applies to, matched exactly. None matches
+    every counterparty; a set never matches an action that names none."""
 
     def __post_init__(self) -> None:
         if self.effect is PolicyEffect.REQUIRE_APPROVAL and not self.approver_role:
             raise ValueError(
                 f"Rule {self.rule_id!r} requires approval but names no approver_role"
+            )
+        if isinstance(self.counterparties, str):
+            # `in` on a str is a substring test, so "mer_1" would quietly
+            # match "mer_12" and "mer_100" too.
+            raise TypeError(
+                f"Rule {self.rule_id!r} counterparties must be a frozenset of ids, not a str"
+            )
+        if self.counterparties is not None and not self.counterparties:
+            raise ValueError(
+                f"Rule {self.rule_id!r} names an empty set of counterparties "
+                "and could never match"
             )
         if (
             self.min_amount is not None
@@ -95,6 +109,15 @@ class PolicyRule:
         if self.kinds is not None and action.kind not in self.kinds:
             kinds = ", ".join(sorted(kind.value for kind in self.kinds))
             return f"kind {action.kind.value} is not one of {kinds}"
+
+        if self.counterparties is not None:
+            # Same reasoning as an amount bound below: a rule about who gets
+            # paid must not silently catch an action that names nobody.
+            if action.counterparty is None:
+                return "the rule names counterparties and the action names none"
+            if action.counterparty not in self.counterparties:
+                named = ", ".join(sorted(self.counterparties))
+                return f"counterparty {action.counterparty} is not one of {named}"
 
         bound = self.min_amount or self.max_amount
         if bound is None:
