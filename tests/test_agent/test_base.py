@@ -23,6 +23,20 @@ class TestAgent:
         agent.attach_tool(DummyTool())
         assert len(agent._tools) == 1
 
+    def test_a_second_tool_under_the_same_name_is_refused(self, agent):
+        class Lookup:
+            def __init__(self, source):
+                self.name = "lookup"
+                self.source = source
+
+        first = Lookup("ledger")
+        agent.attach_tool(first)
+        # It used to be appended, sent to the model as a duplicate
+        # definition, and never called - the loop always found the first.
+        with pytest.raises(ValueError, match="already attached: lookup"):
+            agent.attach_tool(Lookup("bank"))
+        assert agent.tools == (first,)
+
     def test_agent_attach_memory(self, agent, memory_engine):
         agent.attach_memory(memory_engine)
         assert agent._memory is memory_engine

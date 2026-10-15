@@ -84,7 +84,16 @@ class Agent:
         self._provider = provider
 
     def attach_tool(self, tool: BaseTool) -> None:
-        """Register a tool with this agent."""
+        """Register a tool with this agent.
+
+        Raises:
+            ValueError: A tool with the same name is already attached. The
+                model calls tools by name, so a second one could never be
+                reached - and the duplicate definition is sent to the model
+                API, which rejects the whole request over it.
+        """
+        if any(attached.name == tool.name for attached in self._tools):
+            raise ValueError(f"Tool already attached: {tool.name}")
         self._tools.append(tool)
 
     def attach_memory(self, memory: Any) -> None:
