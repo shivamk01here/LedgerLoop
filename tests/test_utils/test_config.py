@@ -80,6 +80,12 @@ class TestShellStyleLines:
         path.write_text("=orphan\nKEY=value\n", encoding="utf-8")
         assert load_config(path, apply=False) == {"KEY": "value"}
 
+    def test_a_byte_order_mark_is_not_part_of_the_first_key(self, tmp_path):
+        # What Notepad writes when told to save as UTF-8.
+        path = tmp_path / ".env"
+        path.write_text("ANTHROPIC_API_KEY=sk-test\nOTHER=1\n", encoding="utf-8-sig")
+        assert load_config(path, apply=False) == {"ANTHROPIC_API_KEY": "sk-test", "OTHER": "1"}
+
 
 class TestQuotedValues:
     def test_hash_inside_quotes_is_part_of_the_value(self, tmp_path):

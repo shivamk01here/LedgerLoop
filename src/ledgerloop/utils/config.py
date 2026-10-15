@@ -25,7 +25,10 @@ def load_config(path: str | Path = ".env", apply: bool = True) -> dict[str, str]
     if not env_path.exists():
         return config
 
-    with env_path.open("r", encoding="utf-8") as f:
+    # utf-8-sig, not utf-8: Notepad and PowerShell's Out-File save with a
+    # byte-order mark, and plain utf-8 hands it back as part of the first
+    # key - "﻿API_KEY", which nothing will ever look up.
+    with env_path.open("r", encoding="utf-8-sig") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
