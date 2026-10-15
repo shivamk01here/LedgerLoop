@@ -185,6 +185,46 @@ Run it end to end, no database and no API key required:
 python examples/gated_refund.py
 ```
 
+## A merchant you have stopped trusting
+
+Policy rules are ordered and the first match wins. A rule can name the kinds
+of action it covers, an amount band, and the counterparties it applies to,
+so freezing one merchant is one rule placed ahead of the rest:
+
+```python
+freeze = PolicyRule(
+    effect=PolicyEffect.DENY,
+    reason="Merchant frozen pending fraud case FC-2207",
+    rule_id="freeze-mer_4c0de",
+    counterparties=frozenset({"mer_4c0de"}),
+)
+policy = ThresholdPolicy(rules=(freeze, *defaults.rules), auto_approve_ceiling=ceiling)
+
+await coordinator.propose(run, build_refund("ord_1002", "1200", "mer_4c0de"))
+# -> PolicyViolationError: Merchant frozen pending fraud case FC-2207
+#    nothing was dispatched. the same refund to anyone else goes straight through.
+```
+
+Counterparties are matched exactly; `mer_1` does not catch `mer_12`. A rule
+that names counterparties never matches an action that names none, so it
+cannot quietly catch a payment to nobody in particular. Turned round, the
+same field is an allow-list: an `ALLOW` rule for known merchants sends a
+merchant nobody has seen before to the tenant default, which asks a human.
+
+`engine.explain(action, run, at=now)` shows the working, rule by rule:
+
+```
+deny at low risk by freeze-mer_4c0de - Merchant frozen pending fraud case FC-2207
+  -> freeze-mer_4c0de (deny): matched
+     allow-read-only (allow): kind refund is not one of annotate, read
+     allow-small-refund (allow): matched
+     deny-payout (deny): kind refund is not one of payout
+```
+
+```bash
+python examples/frozen_merchant.py
+```
+
 ## A batch that has to be walked back
 
 A run that fails halfway has usually already moved money. The compensator
@@ -595,7 +635,7 @@ ledgerloop/
 |---|---|
 | Domain layer (`core/`) | Implemented |
 | Agent loop + Anthropic provider | Implemented |
-| Policy engine | Implemented — ordered rules, risk classification, hard ceiling |
+| Policy engine | Implemented — ordered rules by kind, amount and counterparty, risk classification, hard ceiling, decisions it can explain |
 | Approval gateway | Implemented — role checks, separation of duties, fingerprint binding |
 | Run coordinator — start → propose → gate → halt → resume → complete or fail, plus cancel and operator hold | Implemented |
 | Action executor — exactly-once dispatch | Implemented |
