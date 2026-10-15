@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -49,8 +50,12 @@ class AgentRuntime:
         self.agent = agent
         if max_retries < 1:
             raise ValueError("max_retries must be at least 1")
-        if retry_backoff_seconds < 0:
-            raise ValueError("retry_backoff_seconds cannot be negative")
+        # Both written so NaN fails them. A NaN backoff passed `< 0`, then
+        # `delay <= 0` in _back_off, and asyncio.sleep(nan) never returns.
+        if not (0 <= retry_backoff_seconds < math.inf):
+            raise ValueError("retry_backoff_seconds must be non-negative and finite")
+        if timeout_seconds is not None and not timeout_seconds > 0:
+            raise ValueError("timeout_seconds must be positive")
         self.max_retries = max_retries
         self.retry_backoff_seconds = retry_backoff_seconds
         self._clock = clock

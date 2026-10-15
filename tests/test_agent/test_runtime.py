@@ -207,6 +207,19 @@ class TestBackoff:
         with pytest.raises(ValueError, match="retry_backoff_seconds"):
             AgentRuntime(DummyAgent(), retry_backoff_seconds=-1)
 
+    @pytest.mark.parametrize("base", [float("nan"), float("inf")])
+    def test_a_base_that_would_never_finish_waiting_is_refused(self, base):
+        # Either one used to be accepted and hang the first retry for good.
+        with pytest.raises(ValueError, match="retry_backoff_seconds"):
+            AgentRuntime(DummyAgent(), retry_backoff_seconds=base)
+
+    @pytest.mark.parametrize("timeout", [0, -1, float("nan")])
+    def test_a_timeout_no_attempt_could_meet_is_refused(self, timeout):
+        # Zero or less timed every attempt out before it started, and each
+        # one was then retried and backed off as if the model were slow.
+        with pytest.raises(ValueError, match="timeout_seconds"):
+            AgentRuntime(DummyAgent(), timeout_seconds=timeout)
+
 
 class TestRuntimeConfig:
     def test_from_env_defaults(self):
